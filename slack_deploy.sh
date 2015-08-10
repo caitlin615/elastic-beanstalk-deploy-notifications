@@ -1,19 +1,18 @@
 #!/bin/bash
 
-version="1.0"
+version="1.1"
 
 function usage {
     echo "AWS Elastic Beanstalk Deployment Notifications for Slack (v${version})"
     echo
-    echo "Usage: appsignal_deploy.sh -a <APP NAME> -c <SLACK CHANNEL> -k <API KEY> [options]"
+    echo "Usage: appsignal_deploy.sh -a <APP NAME> -c <SLACK CHANNEL> -w <WEBHOOK_URL> [options]"
     echo
     echo "Options:"
     echo
     echo "  -a  The name your the application in Elastic Beanstalk."
     echo "  -c  The channel to post to (without the hash)."
-    echo "  -w  The webhook url to post to."
     echo "  -d  The name of the deployer (default: AWS Elastic Beanstalk)."
-    echo "  -c  The icon to use (without the colons, default: package)."
+    echo "  -o  The Github Organization/user who owns the repo"
     echo "  -e  Error if the HTTP request fails. Note that this will abort the deployment."
     echo "  -h  Displays this help message."
     echo "  -q  Quiet mode."
@@ -37,24 +36,25 @@ function error {
 app_name=""
 channel=""
 webhook_url=""
-icon=""
-environment=$DEPLOY_STACK_NAME
+environment=$ENVIRONMENT
 deployer=""
 verbose=1
 error_on_fail=0
+branch=""
+github_org=""
 
 if [[ ${#} == 0 ]]; then
     usage
     exit 1
 fi
 
-while getopts "a:c:w:d:i:ehk:qv" option; do
+while getopts "a:c:w:d:o:ehk:qv" option; do
     case "${option}" in
         a) app_name="${OPTARG}";;
         c) channel="${OPTARG}";;
         w) webhook_url="${OPTARG}";;
         d) deployer="${OPTARG}";;
-        i) icon="${OPTARG}";;
+        o) github_org="${OPTARG}";;
         e) error_on_fail=1;;
         h) usage; exit;;
         q) verbose=0;;
@@ -79,16 +79,23 @@ if [[ -z "${deployer}" ]]; then
     deployer="AWS Elastic Beanstalk"
 fi
 
-if [[ -z "${icon}" ]]; then
-    icon="package"
+if [[ -z "${github_org}" ]]; then
+    error "github_org must be supplied"
 fi
 
 if [[ -f REVISION ]]; then
-    app_version=$(cat REVISION)
+    archive_comment=$(cat REVISION)
 else
-    app_version="unknown"
-    error "Unable to extract application version from source REVISION
-file"
+    EB_CONFIG_SOURCE_BUNDLE=$(sudo /opt/elasticbeanstalk/bin/get-config container -k source_bundle)
+    archive_comment=$(unzip -z "${EB_CONFIG_SOURCE_BUNDLE}" | tail -n1)
+
+fi
+if [[ -z "${archive_comment}" ]]; then
+    archive_comment="unknown"
+    error "Unable to extract application version from source REVISION file, or load version information from within the container"
+else
+    app_version=$(echo $archive_comment | cut -d: -f1)
+    branch=$(echo $archive_comment | cut -d: -f2)
 fi
 
 if [[ -z "${environment}" ]]; then
@@ -101,11 +108,18 @@ if [[ ${verbose} == 1 ]]; then
     info "Application environment: ${environment}"
     info "Webhook URL: ${webhook_url}"
     info "Channel: ${channel}"
-    info "Icon: ${icon}"
+    info "Github Org: ${github_org}"
     info "Sending deployment notification..."
 fi
 
-http_response=$(curl -X POST -s -d "{\"channel\":\"#${channel}\",\"icon_emoji\":\":${icon}:\",\"text\":\"${app_name} was successfully deployed to ${environment} by ${deployer}\",\"username\":\"${deployer}\",\"attachments\":[{\"fallback\":\"${app_name} was successfully deployed to ${environment} by ${deployer}\",\"color\":\"#8eb573\",\"fields\":[{\"title\":\"Environment:\",\"value\":\"${environment}\",\"short\":false},{\"title\":\"Version:\",\"value\":\"${app_version}\"}]}]}" "${webhook_url}")
+http_response=$(curl -X POST -s -d "{\"channel\":\"#${channel}\",\
+    \"text\":\"*${app_name} was successfully deployed to ${environment} by ${deployer}* :seedling:\",\
+    \"username\":\"${deployer}\",\"attachments\":[\
+        {\"fallback\":\"*${app_name} was successfully deployed to ${environment} by ${deployer}*\",\
+        \"color\":\"#8eb573\",\"fields\":[\
+            {\"title\":\"Environment:\",\"value\":\"${environment}\",\"short\":false},\
+            {\"title\":\"Version:\",\"value\":\"<https://github.com/${github_org}/${app_name}/${app_version}|${app_version}>\"},\
+            {\"title\":\"Branch:\",\"value\":\"${branch}\"}]}]}" "${webhook_url}")
 http_status=$(echo "${http_response}" | head -n 1)
 echo "${http_status}" | grep -q "ok"
 
